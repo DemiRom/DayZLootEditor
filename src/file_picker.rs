@@ -2,7 +2,7 @@ use std::{fs, io, path::PathBuf};
 
 use crate::action::Action;
 use tui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout},
     style::{Modifier, Style},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
@@ -208,4 +208,3 @@ fn render_help_overlay<B: tui::backend::Backend>(f: &mut tui::Frame<B>) {
     f.render_widget(Clear, area);
     f.render_widget(help, area);
 }
-
