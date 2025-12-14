@@ -1,0 +1,19 @@
+pub enum Action {
+    Quit,
+    Up,
+    Down,
+    Left,
+    Right,
+    Activate,
+    Save,
+    Cancel,
+    Backspace,
+    Add,
+    Copy,
+    Delete,
+    Help,
+    Input(char),
+    PgDown,
+    PgUp,
+    None
+}
