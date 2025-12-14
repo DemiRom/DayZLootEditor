@@ -1,9 +1,10 @@
 [package]
 name = "dayz-loot-editor-rust"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]
 crossterm = "0.29.0"
+ssh2 = "0.9.5"
 tui = "0.19.0"
 xml-rs = "1.0.0"

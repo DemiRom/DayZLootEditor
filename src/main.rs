@@ -16,11 +16,13 @@ mod editor;
 mod action;
 mod window_state;
 mod utils;
+mod remote;
 
 use crate::file_picker::FilePicker;
 use crate::editor::Editor;
 use crate::action::Action;
 use crate::window_state::WindowState;
+use crate::remote::RemoteConfig;
 
 fn main() -> Result<(), io::Error> {
     enable_raw_mode()?;
@@ -31,7 +33,8 @@ fn main() -> Result<(), io::Error> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let mut file_picker= FilePicker::new(std::env::current_dir()?)?;
+    let remote_config = RemoteConfig::from_env();
+    let mut file_picker= FilePicker::new(std::env::current_dir()?, remote_config)?;
     let mut editor = Editor::new();
 
     let mut state = WindowState::FilePicker;
@@ -53,16 +56,17 @@ fn main() -> Result<(), io::Error> {
         if event::poll(Duration::from_millis(200))? {
             match event::read()? {
                 Event::Key(key) => {
-                    let editing_mode = matches!(state, WindowState::Editor) && editor.is_editing();
-                    let action = map_key_to_action(key, editing_mode);
+                    let text_editing = matches!(state, WindowState::Editor) && editor.is_editing();
+                    let prompt_mode = matches!(state, WindowState::FilePicker) && file_picker.is_prompt();
+                    let action = map_key_to_action(key, text_editing, prompt_mode);
                     match (state, action) {
                         (_, Action::Quit) => running = false,
-                        (_, Action::Help) if !editing_mode => {
+                        (_, Action::Help) if !text_editing && !prompt_mode => {
                             show_help = !show_help;
                         }
                         (WindowState::FilePicker, action) => {
-                            if let Some(path_buffer) = file_picker.handle_action(action)? {
-                                match editor.load(path_buffer) {
+                            if let Some(selection) = file_picker.handle_action(action)? {
+                                match editor.load(selection) {
                                     Ok(_) => {
                                         state = WindowState::Editor;
                                     }
@@ -96,12 +100,27 @@ fn main() -> Result<(), io::Error> {
     Ok(())
 }
 
-fn map_key_to_action(key: KeyEvent, editing: bool) -> Action {
-    if editing {
+fn map_key_to_action(key: KeyEvent, text_editing: bool, prompt_mode: bool) -> Action {
+    if text_editing {
         return match key.code {
             KeyCode::Enter => Action::Activate,
             KeyCode::Esc => Action::Cancel,
             KeyCode::Backspace => Action::Backspace,
+            KeyCode::Char(c) => Action::Input(c),
+            _ => Action::None,
+        };
+    }
+
+    if prompt_mode {
+        return match key.code {
+            KeyCode::Enter => Action::Activate,
+            KeyCode::Esc => Action::Cancel,
+            KeyCode::Backspace => Action::Backspace,
+            KeyCode::Tab => Action::Tab,
+            KeyCode::Up => Action::Up,
+            KeyCode::Down => Action::Down,
+            KeyCode::PageUp => Action::PgUp,
+            KeyCode::PageDown => Action::PgDown,
             KeyCode::Char(c) => Action::Input(c),
             _ => Action::None,
         };
@@ -118,7 +137,9 @@ fn map_key_to_action(key: KeyEvent, editing: bool) -> Action {
         KeyCode::Char('a') => Action::Add,
         KeyCode::Char('c') => Action::Copy,
         KeyCode::Char('d') => Action::Delete,
+        KeyCode::Char('r') => Action::ToggleRemote,
         KeyCode::Char('?') => Action::Help,
+        KeyCode::Tab => Action::Tab,
         KeyCode::Esc => Action::Cancel,
         KeyCode::Backspace => Action::Backspace,
         KeyCode::Char(c) => Action::Input(c),

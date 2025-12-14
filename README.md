@@ -8,6 +8,7 @@ A terminal UI (TUI) for browsing DayZ `types.xml` files, inspecting loot types, 
 Features
 --------
 - File picker to choose a `types.xml` (with error feedback for unsupported files).
+- Optional SSH mode: connect via SFTP to browse/edit remote `types.xml` (enter host/creds in-app; works with key auth).
 - Two-pane editor: type list on the left, fields on the right.
 - Inline editing for type names and field values.
 - Add, copy, and delete types or fields with keyboard shortcuts.
@@ -23,6 +24,7 @@ Controls
 **File Picker**
 - Up/Down or `j`/`k` to move
 - Enter to open directory or select file
+- `r` toggle SSH: opens a prompt to enter host/user/port and optional password/key; Enter to connect; `r` again to switch back to local
 - Errors (e.g., unsupported file) are shown in the status bar
 
 **Editor**
@@ -45,6 +47,7 @@ Project Layout
 --------------
 - `src/file_picker.rs` — directory navigation and status handling
 - `src/editor.rs` — XML parsing, editing, saving, and help overlay
+- `src/remote.rs` — SSH/SFTP backend and file source tagging
 - `src/action.rs` — shared action enum for key handling
 - `example/types.xml` — sample DayZ loot types file
 

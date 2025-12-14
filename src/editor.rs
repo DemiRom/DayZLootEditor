@@ -15,8 +15,11 @@ use xml::{
     writer::EmitterConfig,
 };
 
-use crate::action::Action;
-use crate::utils;
+use crate::{
+    action::Action,
+    remote::{FileSelection, FileSource},
+    utils,
+};
 
 #[derive(Clone, Debug)]
 enum FieldKey {
@@ -51,6 +54,7 @@ enum EditTarget {
 
 pub struct Editor {
     path: Option<PathBuf>,
+    source: FileSource,
     types: Vec<TypeEntry>,
     selected_type: usize,
     selected_field: usize,
@@ -64,6 +68,7 @@ impl Editor {
     pub fn new() -> Self {
         Self {
             path: None,
+            source: FileSource::Local,
             types: Vec::new(),
             selected_type: 0,
             selected_field: 0,
@@ -74,12 +79,19 @@ impl Editor {
         }
     }
 
-    pub fn load(&mut self, path: PathBuf) -> io::Result<()> {
-        let content = fs::read_to_string(&path)?;
+    pub fn load(&mut self, selection: FileSelection) -> io::Result<()> {
+        let content = match &selection.source {
+            FileSource::Local => fs::read_to_string(&selection.path)?,
+            FileSource::Remote(client) => {
+                let client = client.lock().map_err(|_| io::Error::new(io::ErrorKind::Other, "SSH backend in use"))?;
+                client.read_file(&selection.path)?
+            }
+        };
         let types = parse_types(&content)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("XML parse error: {}", e)))?;
 
-        self.path = Some(path);
+        self.path = Some(selection.path);
+        self.source = selection.source;
         self.types = types;
         self.selected_type = 0;
         self.selected_field = 0;
@@ -155,7 +167,13 @@ impl Editor {
             .split(f.size());
 
         let header_text = match &self.path {
-            Some(path) => format!("Editing: {}", path.display()),
+            Some(path) => {
+                let src = match self.source {
+                    FileSource::Local => "local",
+                    FileSource::Remote(_) => "ssh",
+                };
+                format!("Editing: {} ({})", path.display(), src)
+            }
             None => String::from("No file loaded"),
         };
         let header = Paragraph::new(header_text)
@@ -318,13 +336,25 @@ impl Editor {
         let mut backup_path = path.clone();
         backup_path.add_extension("bak");
 
-        let content = fs::read_to_string(&path)?;
-        fs::write(&backup_path, content)?;
-        self.status = format!("Created Backup {}", backup_path.display());
-
-        let xml = serialize_types(&self.types)?;
-        fs::write(&path, xml)?;
-        self.status = format!("Saved {}", path.display());
+        match &self.source {
+            FileSource::Local => {
+                if let Ok(content) = fs::read_to_string(&path) {
+                    let _ = fs::write(&backup_path, content);
+                }
+                let xml = serialize_types(&self.types)?;
+                fs::write(&path, xml)?;
+                self.status = format!("Saved {}", path.display());
+            }
+            FileSource::Remote(client) => {
+                let client = client.lock().map_err(|_| io::Error::new(io::ErrorKind::Other, "SSH backend in use"))?;
+                if let Ok(content) = client.read_file(&path) {
+                    let _ = client.write_file(&backup_path, &content);
+                }
+                let xml = serialize_types(&self.types)?;
+                client.write_file(&path, &xml)?;
+                self.status = format!("Saved remote {}", path.display());
+            }
+        }
         Ok(())
     }
 

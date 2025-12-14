@@ -12,8 +12,10 @@ pub enum Action {
     Copy,
     Delete,
     Help,
+    ToggleRemote,
     Input(char),
     PgDown,
     PgUp,
+    Tab,
     None
 }
