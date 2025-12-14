@@ -1,0 +1,57 @@
+name: Build and Release (Linux)
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    name: Build and release Linux binary
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Read version from Cargo.toml
+        id: version
+        run: |
+          python - <<'PY'
+          import tomllib, pathlib, os
+          data = tomllib.loads(pathlib.Path("Cargo.toml").read_text())
+          version = data["package"]["version"]
+          print(f"version={version}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"version={version}\n")
+          PY
+
+      - name: Fetch tags
+        run: git fetch --tags
+
+      - name: Check if tag exists
+        id: tag_check
+        run: |
+          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build release binary (Linux)
+        if: steps.tag_check.outputs.exists == 'false'
+        run: cargo build --release
+
+      - name: Create GitHub release
+        if: steps.tag_check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+          files: |
+            target/release/dayz-loot-editor-rust
