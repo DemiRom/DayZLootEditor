@@ -465,7 +465,7 @@ fn highlight_for(active: bool) -> Style {
 
 fn render_help_overlay<B: tui::backend::Backend>(f: &mut tui::Frame<B>) {
     let area = utils::centered_rect(70, 70, f.size());
-    let text = "Editor Help\n\nNavigation: Up/Down or j/k to move, Left/Right to switch pane\nEditing: Enter to edit, Esc to cancel, type to change text, Enter to apply\nActions: a add (type or field), c copy, d delete, s save, q quit, ? help";
+    let text = "Editor Help\n\nNavigation: Up/Down or j/k or PageUp/PageDown to move, Left/Right to switch pane\nEditing: Enter to edit, Esc to cancel, type to change text, Enter to apply\nActions: a add (type or field), c copy, d delete, s save, q quit, ? help";
     let block = Block::default().title("Help").borders(Borders::ALL);
     let help = Paragraph::new(text).wrap(Wrap { trim: true }).block(block);
     f.render_widget(Clear, area);
