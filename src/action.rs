@@ -9,11 +9,14 @@ pub enum Action {
     Cancel,
     Backspace,
     Add,
+    AddAttribute,
     Copy,
     Delete,
     Help,
+    ToggleRemote,
     Input(char),
     PgDown,
     PgUp,
+    Tab,
     None
 }

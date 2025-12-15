@@ -4,7 +4,6 @@ use std::{
     io,
     path::PathBuf,
 };
-
 use tui::{
     layout::{Constraint, Direction, Layout},
     style::{Modifier, Style},
@@ -15,8 +14,11 @@ use xml::{
     writer::EmitterConfig,
 };
 
-use crate::action::Action;
-use crate::utils;
+use crate::{
+    action::Action,
+    remote::{FileSelection, FileSource},
+    utils,
+};
 
 #[derive(Clone, Debug)]
 enum FieldKey {
@@ -46,11 +48,13 @@ enum EditorFocus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EditTarget {
     TypeName,
+    FieldName,
     FieldValue,
 }
 
 pub struct Editor {
     path: Option<PathBuf>,
+    source: FileSource,
     types: Vec<TypeEntry>,
     selected_type: usize,
     selected_field: usize,
@@ -60,10 +64,60 @@ pub struct Editor {
     status: String,
 }
 
+impl FieldKey {
+    pub fn set_name(&mut self, new_name: String) {
+        match self {
+            FieldKey::Element { name, .. } => *name = new_name,
+            FieldKey::Attribute { attr, .. } => *attr = new_name,
+        }
+    }
+
+    pub fn get_help_text(&self) -> String{
+        match self {
+            FieldKey::Element { name, .. } => {
+                match name.as_str() {
+                    "nominal" => "The nominal (wanted) amount in the server. Same as max is max is not used.".to_string(),
+                    "lifetime" => "The amount of time it takes for the item to despawn when the item is on the ground.\nDoes not come into effect if the item is ruined".to_string(),
+                    "restock" => "How long after one of the same item (despawns or is picked up by the player) is a new one spawned.".to_string(),
+                    "min" => "Minimum quantity of items to spawn this applies to the entire map.".to_string(),
+                    "quantmin" => "Minimum quantity of the item to spawn in a stack. Eg. Ammunition stack quantity.".to_string(),
+                    "quantmax" => "Maximum quantity of the item to spawn in a stack. Eg. Ammunition stack quantity.".to_string(),
+                    "cost" => "Loot spawning prioritizer - no one really knows what this does exactly. :D".to_string(),
+                    "category" | "usage" | "tag" => "The location class of where this item can spawn.".to_string(),
+                    "flags" => "".to_string(),
+                    _ => "Unknown field - open a github issue with the field name.".to_string()
+                }
+            }
+            FieldKey::Attribute { attr, .. } => {
+                match attr.as_str() {
+                    "count_in_cargo" => "Boolean flag. Sets the total amount that can spawn (map wide) in cargo (tents, boxes, vehicles).\nIf flag is set to 1, item won't spawn if there are already a nominal number of items for this flag.".to_string(),
+                    "count_in_hoarder" => "Boolean flag. Sets the total amount that can spawn (map wide) in Zombies.\nIf flag is set to 1, item won't spawn if there are already a nominal number of items for this flag.".to_string(),
+                    "count_in_map" => "Boolean flag. Sets the total amount that can spawn on the map.\nIf flag is set to 1, item won't spawn if there are already a nominal number of items for this flag.".to_string(),
+                    "count_in_player" => "Boolean flag. Sets the total amount that can spawn (map wide) on players.\nIf flag is set to 1, item won't spawn if there are already a nominal number of items for this flag.".to_string(),
+                    "crafted" => "Boolean flag. Sets the total amount based on crafted count (map wide)\nIf flag is set to 1, item won't spawn if there are already a nominal number of items for this flag.".to_string(),
+                    "deloot" => "Boolean flag. Sets the total amount (map wide) from dynamic events. E.g Helicopter crashes etc.\nIf flag is set to 1, item won't spawn if there are already a nominal number of items for this flag.".to_string(),
+                    "name" => "The location class of where this item can spawn.".to_string(),
+                    _ => {
+                        format!("Unknown attribute - open a github issue. {}", attr)
+                    },
+                }
+            }
+        }
+    }
+
+    pub fn get_element_name(&self) -> &str {
+        match self {
+            FieldKey::Element { name, .. } => name.as_str(),
+            FieldKey::Attribute { element, .. } => element.as_str(),
+        }
+    }
+}
+
 impl Editor {
     pub fn new() -> Self {
         Self {
             path: None,
+            source: FileSource::Local,
             types: Vec::new(),
             selected_type: 0,
             selected_field: 0,
@@ -74,16 +128,23 @@ impl Editor {
         }
     }
 
-    pub fn load(&mut self, path: PathBuf) -> io::Result<()> {
-        let content = fs::read_to_string(&path)?;
+    pub fn load(&mut self, selection: FileSelection) -> io::Result<()> {
+        let content = match &selection.source {
+            FileSource::Local => fs::read_to_string(&selection.path)?,
+            FileSource::Remote(client) => {
+                let client = client.lock().map_err(|_| io::Error::new(io::ErrorKind::Other, "SSH backend in use"))?;
+                client.read_file(&selection.path)?
+            }
+        };
         let types = parse_types(&content)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("XML parse error: {}", e)))?;
 
-        self.path = Some(path);
+        self.path = Some(selection.path);
+        self.source = selection.source;
         self.types = types;
         self.selected_type = 0;
         self.selected_field = 0;
-        self.focus = EditorFocus::FieldList;
+        self.focus = EditorFocus::TypeList;
         self.editing_target = None;
         self.input_buffer.clear();
         self.status = String::from("Loaded file");
@@ -103,8 +164,10 @@ impl Editor {
                         self.input_buffer.pop();
                     }
                     Action::Activate => {
-                        self.apply_input();
-                        self.stop_editing();
+                        let continue_editing = self.apply_input();
+                        if !continue_editing {
+                            self.stop_editing();
+                        }
                     }
                     Action::Cancel => {
                         self.input_buffer.clear();
@@ -129,6 +192,7 @@ impl Editor {
                     self.begin_editing();
                 }
                 Action::Add => self.add(),
+                Action::AddAttribute => self.add_attribute(),
                 Action::Copy => self.copy(),
                 Action::Delete => self.delete(),
                 Action::Save => {
@@ -155,7 +219,13 @@ impl Editor {
             .split(f.size());
 
         let header_text = match &self.path {
-            Some(path) => format!("Editing: {}", path.display()),
+            Some(path) => {
+                let src = match self.source {
+                    FileSource::Local => "local",
+                    FileSource::Remote(_) => "ssh",
+                };
+                format!("Editing: {} ({})", path.display(), src)
+            }
             None => String::from("No file loaded"),
         };
         let header = Paragraph::new(header_text)
@@ -165,7 +235,11 @@ impl Editor {
 
         let body = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(35), Constraint::Percentage(65)].as_ref())
+            .constraints([
+                Constraint::Percentage(35),
+                Constraint::Percentage(45),
+                Constraint::Percentage(20)
+            ].as_ref())
             .split(chunks[1]);
 
         let type_items: Vec<ListItem> = self
@@ -203,9 +277,16 @@ impl Editor {
             ));
         f.render_stateful_widget(field_list, body[1], &mut field_state);
 
+        let selected_field_string = self.current_field().unwrap().key.get_help_text().to_string();
+        let tips_widget = Paragraph::new(selected_field_string)
+            .block(Block::default().title("Tips").borders(Borders::ALL))
+            .wrap(Wrap { trim: true });
+
+        f.render_widget(tips_widget, body[2]);
+
         let footer_text = if self.focus == EditorFocus::Editing {
             format!("Help: ? | Quit: q | Status: editing ({})", self.input_buffer)
-        } else {
+        } else {//
             format!("Help: ? | Quit: q | Status: {}", self.status)
         };
         let footer = Paragraph::new(footer_text)
@@ -271,7 +352,7 @@ impl Editor {
                     self.input_buffer = field.value.clone();
                     self.editing_target = Some(EditTarget::FieldValue);
                     self.focus = EditorFocus::Editing;
-                    self.status = String::from("Editing field");
+                    self.status = String::from("Editing field value");
                 }
             }
             EditorFocus::Editing => {}
@@ -281,6 +362,7 @@ impl Editor {
     fn stop_editing(&mut self) {
         self.focus = match self.editing_target {
             Some(EditTarget::TypeName) => EditorFocus::TypeList,
+            Some(EditTarget::FieldName) => EditorFocus::FieldList,
             Some(EditTarget::FieldValue) => EditorFocus::FieldList,
             None => self.focus,
         };
@@ -288,7 +370,7 @@ impl Editor {
         self.input_buffer.clear();
     }
 
-    fn apply_input(&mut self) {
+    fn apply_input(&mut self) -> bool {
         let value = self.input_buffer.clone();
         match self.editing_target {
             Some(EditTarget::TypeName) => {
@@ -296,14 +378,29 @@ impl Editor {
                     ty.name = value;
                     self.status = String::from("Type renamed");
                 }
+                false
+            }
+            Some(EditTarget::FieldName) => {
+                if let Some(field) = self.current_field_mut() {
+                    field.key.set_name(value);
+                    if let Some(field) = self.current_field() {
+                        self.input_buffer = field.value.clone();
+                        self.editing_target = Some(EditTarget::FieldValue);
+                        self.status = String::from("Field renamed; edit value");
+                        return true;
+                    }
+                    self.status = String::from("Field renamed");
+                }
+                false
             }
             Some(EditTarget::FieldValue) => {
                 if let Some(field) = self.current_field_mut() {
                     field.value = value;
                     self.status = String::from("Value updated");
                 }
+                false
             }
-            None => {}
+            None => false,
         }
     }
 
@@ -318,13 +415,25 @@ impl Editor {
         let mut backup_path = path.clone();
         backup_path.add_extension("bak");
 
-        let content = fs::read_to_string(&path)?;
-        fs::write(&backup_path, content)?;
-        self.status = format!("Created Backup {}", backup_path.display());
-
-        let xml = serialize_types(&self.types)?;
-        fs::write(&path, xml)?;
-        self.status = format!("Saved {}", path.display());
+        match &self.source {
+            FileSource::Local => {
+                if let Ok(content) = fs::read_to_string(&path) {
+                    let _ = fs::write(&backup_path, content);
+                }
+                let xml = serialize_types(&self.types)?;
+                fs::write(&path, xml)?;
+                self.status = format!("Saved {}", path.display());
+            }
+            FileSource::Remote(client) => {
+                let client = client.lock().map_err(|_| io::Error::new(io::ErrorKind::Other, "SSH backend in use"))?;
+                if let Ok(content) = client.read_file(&path) {
+                    let _ = client.write_file(&backup_path, &content);
+                }
+                let xml = serialize_types(&self.types)?;
+                client.write_file(&path, &xml)?;
+                self.status = format!("Saved remote {}", path.display());
+            }
+        }
         Ok(())
     }
 
@@ -360,11 +469,45 @@ impl Editor {
                 if let Some(ty) = self.types.get_mut(self.selected_type) {
                     ty.fields.push(field);
                     self.selected_field = ty.fields.len().saturating_sub(1);
-                    self.begin_editing();
+                    // First edit the field name, then fall through to value editing when applied.
+                    self.input_buffer = new_field_name;
+                    self.editing_target = Some(EditTarget::FieldName);
+                    self.focus = EditorFocus::Editing;
                 }
-                self.status = String::from("Added new field; enter a value");
+                self.status = String::from("Added new field; enter a name");
             }
             EditorFocus::Editing => {}
+        }
+    }
+
+    fn add_attribute(&mut self) {
+        if self.types.is_empty() {
+            return;
+        }
+        let Some(base_field) = self.current_field() else {
+            return;
+        };
+        let element = base_field.key.get_element_name().to_string();
+        let index = match &base_field.key {
+            FieldKey::Element { index, .. } => *index,
+            FieldKey::Attribute { index, .. } => *index,
+        };
+        let new_attr_name = "new_attr".to_string();
+        let field = Field {
+            key: FieldKey::Attribute {
+                element,
+                index,
+                attr: new_attr_name.clone(),
+            },
+            value: String::new(),
+        };
+        if let Some(ty) = self.types.get_mut(self.selected_type) {
+            ty.fields.push(field);
+            self.selected_field = ty.fields.len().saturating_sub(1);
+            self.input_buffer = new_attr_name;
+            self.editing_target = Some(EditTarget::FieldName);
+            self.focus = EditorFocus::Editing;
+            self.status = String::from("Added new attribute; enter a name");
         }
     }
 
@@ -465,7 +608,7 @@ fn highlight_for(active: bool) -> Style {
 
 fn render_help_overlay<B: tui::backend::Backend>(f: &mut tui::Frame<B>) {
     let area = utils::centered_rect(70, 70, f.size());
-    let text = "Editor Help\n\nNavigation: Up/Down or j/k to move, Left/Right to switch pane\nEditing: Enter to edit, Esc to cancel, type to change text, Enter to apply\nActions: a add (type or field), c copy, d delete, s save, q quit, ? help";
+    let text = "Editor Help\n\nNavigation: Up/Down or j/k or PageUp/PageDown to move, Left/Right to switch pane\nEditing: Enter to edit, Esc to cancel, type to change text, Enter to apply\nActions: a add (type or field), t add field with attribute, c copy, d delete, s save, q quit, ? help";
     let block = Block::default().title("Help").borders(Borders::ALL);
     let help = Paragraph::new(text).wrap(Wrap { trim: true }).block(block);
     f.render_widget(Clear, area);
