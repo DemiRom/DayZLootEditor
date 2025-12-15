@@ -1,6 +1,9 @@
 DayZ Loot Editor (Rust)
 =======================
 
+[![Build (main)](https://img.shields.io/github/actions/workflow/status/your-org-or-user/dayz-loot-editor-rust/release.yml?branch=main&label=build%20main)](https://github.com/your-org-or-user/dayz-loot-editor-rust/actions/workflows/release.yml?query=branch%3Amain)
+[![Build (dev)](https://img.shields.io/github/actions/workflow/status/your-org-or-user/dayz-loot-editor-rust/release.yml?branch=dev&label=build%20dev)](https://github.com/your-org-or-user/dayz-loot-editor-rust/actions/workflows/release.yml?query=branch%3Adev)
+
 A terminal UI (TUI) for browsing DayZ `types.xml` files, inspecting loot types, and editing fields quickly without leaving your terminal. Built with `tui` + `crossterm`.
 
 ![Screenshot of the TUI editor](assets/screenshot_1.png)
