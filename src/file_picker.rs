@@ -397,7 +397,7 @@ impl FilePicker {
 
 fn render_help_overlay<B: tui::backend::Backend>(f: &mut tui::Frame<B>) {
     let area = utils::centered_rect(70, 70, f.size());
-    let text = "File Picker Help\n\n- Up/Down or j/k: move\n- Enter: open directory/select file\n- r: toggle SSH (requires SSH_* env vars)\n- q: quit\n- ?: toggle this help";
+    let text = "File Picker Help\n\n- Up/Down or j/k: move\n- PgUp/PgDown: jump lists\n- Enter: open directory/select file\n- r: toggle SSH (enter host/user/port/password/key); r again returns to local\n- q: quit\n- ?: toggle this help";
     let block = Block::default().title("Help").borders(Borders::ALL);
     let help = Paragraph::new(text).wrap(Wrap { trim: true }).block(block);
     f.render_widget(Clear, area);

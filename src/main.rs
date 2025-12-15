@@ -137,6 +137,7 @@ fn map_key_to_action(key: KeyEvent, text_editing: bool, prompt_mode: bool) -> Ac
         KeyCode::Char('a') => Action::Add,
         KeyCode::Char('c') => Action::Copy,
         KeyCode::Char('d') => Action::Delete,
+        KeyCode::Char('t') => Action::AddAttribute,
         KeyCode::Char('r') => Action::ToggleRemote,
         KeyCode::Char('?') => Action::Help,
         KeyCode::Tab => Action::Tab,

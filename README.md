@@ -10,8 +10,9 @@ Features
 - File picker to choose a `types.xml` (with error feedback for unsupported files).
 - Optional SSH mode: connect via SFTP to browse/edit remote `types.xml` (enter host/creds in-app; works with key auth).
 - Two-pane editor: type list on the left, fields on the right.
-- Inline editing for type names and field values.
+- Inline editing for type names, field names/attributes, and values.
 - Add, copy, and delete types or fields with keyboard shortcuts.
+- Add attributes to fields and edit their names/values.
 - Save back to XML with indentation.
 - Toggleable in-app help overlay.
 
@@ -31,6 +32,7 @@ Controls
 - Up/Down or `j`/`k` to move; Left/Right to switch pane
 - Enter to edit; type to change text; Enter to apply; Esc to cancel
 - `a` add (type when on the type pane, field when on the field pane)
+- `t` add attribute to the current element; first edit the attr name, then its value
 - `c` copy current type/field
 - `d` delete current type/field
 - `s` save

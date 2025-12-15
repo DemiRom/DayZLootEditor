@@ -9,6 +9,7 @@ pub enum Action {
     Cancel,
     Backspace,
     Add,
+    AddAttribute,
     Copy,
     Delete,
     Help,

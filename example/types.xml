@@ -15,7 +15,6 @@
     <value name="Tier5" />
     <value name="Tier9" />
     <value name="Tier8" />
-    <usage name="Military" />
   </type>
   <type name="ACOGOptic_6x">
     <nominal>15</nominal>

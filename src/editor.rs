@@ -4,7 +4,6 @@ use std::{
     io,
     path::PathBuf,
 };
-use std::iter::Map;
 use tui::{
     layout::{Constraint, Direction, Layout},
     style::{Modifier, Style},
@@ -49,6 +48,7 @@ enum EditorFocus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EditTarget {
     TypeName,
+    FieldName,
     FieldValue,
 }
 
@@ -65,10 +65,10 @@ pub struct Editor {
 }
 
 impl FieldKey {
-    pub fn get_field_name(&self) -> &str {
+    pub fn set_name(&mut self, new_name: String) {
         match self {
-            FieldKey::Element { name, .. } => name.as_str(),
-            FieldKey::Attribute { attr, .. } => attr.as_str(),
+            FieldKey::Element { name, .. } => *name = new_name,
+            FieldKey::Attribute { attr, .. } => *attr = new_name,
         }
     }
 
@@ -164,8 +164,10 @@ impl Editor {
                         self.input_buffer.pop();
                     }
                     Action::Activate => {
-                        self.apply_input();
-                        self.stop_editing();
+                        let continue_editing = self.apply_input();
+                        if !continue_editing {
+                            self.stop_editing();
+                        }
                     }
                     Action::Cancel => {
                         self.input_buffer.clear();
@@ -190,6 +192,7 @@ impl Editor {
                     self.begin_editing();
                 }
                 Action::Add => self.add(),
+                Action::AddAttribute => self.add_attribute(),
                 Action::Copy => self.copy(),
                 Action::Delete => self.delete(),
                 Action::Save => {
@@ -282,7 +285,7 @@ impl Editor {
         f.render_widget(tips_widget, body[2]);
 
         let footer_text = if self.focus == EditorFocus::Editing {
-            format!("Help: ? | Quit: q | Stat//us: editing ({})", self.input_buffer)
+            format!("Help: ? | Quit: q | Status: editing ({})", self.input_buffer)
         } else {//
             format!("Help: ? | Quit: q | Status: {}", self.status)
         };
@@ -349,7 +352,7 @@ impl Editor {
                     self.input_buffer = field.value.clone();
                     self.editing_target = Some(EditTarget::FieldValue);
                     self.focus = EditorFocus::Editing;
-                    self.status = String::from("Editing field");
+                    self.status = String::from("Editing field value");
                 }
             }
             EditorFocus::Editing => {}
@@ -359,6 +362,7 @@ impl Editor {
     fn stop_editing(&mut self) {
         self.focus = match self.editing_target {
             Some(EditTarget::TypeName) => EditorFocus::TypeList,
+            Some(EditTarget::FieldName) => EditorFocus::FieldList,
             Some(EditTarget::FieldValue) => EditorFocus::FieldList,
             None => self.focus,
         };
@@ -366,7 +370,7 @@ impl Editor {
         self.input_buffer.clear();
     }
 
-    fn apply_input(&mut self) {
+    fn apply_input(&mut self) -> bool {
         let value = self.input_buffer.clone();
         match self.editing_target {
             Some(EditTarget::TypeName) => {
@@ -374,14 +378,29 @@ impl Editor {
                     ty.name = value;
                     self.status = String::from("Type renamed");
                 }
+                false
+            }
+            Some(EditTarget::FieldName) => {
+                if let Some(field) = self.current_field_mut() {
+                    field.key.set_name(value);
+                    if let Some(field) = self.current_field() {
+                        self.input_buffer = field.value.clone();
+                        self.editing_target = Some(EditTarget::FieldValue);
+                        self.status = String::from("Field renamed; edit value");
+                        return true;
+                    }
+                    self.status = String::from("Field renamed");
+                }
+                false
             }
             Some(EditTarget::FieldValue) => {
                 if let Some(field) = self.current_field_mut() {
                     field.value = value;
                     self.status = String::from("Value updated");
                 }
+                false
             }
-            None => {}
+            None => false,
         }
     }
 
@@ -450,11 +469,45 @@ impl Editor {
                 if let Some(ty) = self.types.get_mut(self.selected_type) {
                     ty.fields.push(field);
                     self.selected_field = ty.fields.len().saturating_sub(1);
-                    self.begin_editing();
+                    // First edit the field name, then fall through to value editing when applied.
+                    self.input_buffer = new_field_name;
+                    self.editing_target = Some(EditTarget::FieldName);
+                    self.focus = EditorFocus::Editing;
                 }
-                self.status = String::from("Added new field; enter a value");
+                self.status = String::from("Added new field; enter a name");
             }
             EditorFocus::Editing => {}
+        }
+    }
+
+    fn add_attribute(&mut self) {
+        if self.types.is_empty() {
+            return;
+        }
+        let Some(base_field) = self.current_field() else {
+            return;
+        };
+        let element = base_field.key.get_element_name().to_string();
+        let index = match &base_field.key {
+            FieldKey::Element { index, .. } => *index,
+            FieldKey::Attribute { index, .. } => *index,
+        };
+        let new_attr_name = "new_attr".to_string();
+        let field = Field {
+            key: FieldKey::Attribute {
+                element,
+                index,
+                attr: new_attr_name.clone(),
+            },
+            value: String::new(),
+        };
+        if let Some(ty) = self.types.get_mut(self.selected_type) {
+            ty.fields.push(field);
+            self.selected_field = ty.fields.len().saturating_sub(1);
+            self.input_buffer = new_attr_name;
+            self.editing_target = Some(EditTarget::FieldName);
+            self.focus = EditorFocus::Editing;
+            self.status = String::from("Added new attribute; enter a name");
         }
     }
 
@@ -555,7 +608,7 @@ fn highlight_for(active: bool) -> Style {
 
 fn render_help_overlay<B: tui::backend::Backend>(f: &mut tui::Frame<B>) {
     let area = utils::centered_rect(70, 70, f.size());
-    let text = "Editor Help\n\nNavigation: Up/Down or j/k or PageUp/PageDown to move, Left/Right to switch pane\nEditing: Enter to edit, Esc to cancel, type to change text, Enter to apply\nActions: a add (type or field), c copy, d delete, s save, q quit, ? help";
+    let text = "Editor Help\n\nNavigation: Up/Down or j/k or PageUp/PageDown to move, Left/Right to switch pane\nEditing: Enter to edit, Esc to cancel, type to change text, Enter to apply\nActions: a add (type or field), t add field with attribute, c copy, d delete, s save, q quit, ? help";
     let block = Block::default().title("Help").borders(Borders::ALL);
     let help = Paragraph::new(text).wrap(Wrap { trim: true }).block(block);
     f.render_widget(Clear, area);
