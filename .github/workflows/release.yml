@@ -1,4 +1,4 @@
-name: Build and Release (Linux)
+name: Build and Release (Linux/Windows)
 
 on:
   push:
@@ -9,16 +9,14 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: Build and release Linux binary
+  prepare:
     runs-on: ubuntu-latest
-
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag_exists: ${{ steps.tag_check.outputs.exists }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
 
       - name: Read version from Cargo.toml
         id: version
@@ -44,17 +42,35 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build release binary (Linux)
-        if: steps.tag_check.outputs.exists == 'false'
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.tag_exists == 'false'
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: target/release/dayz-loot-editor-rust
+          - os: macos-latest
+            artifact: target/release/dayz-loot-editor-rust
+          - os: windows-latest
+            artifact: target/release/dayz-loot-editor-rust.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
         run: cargo build --release
 
-      - name: Create GitHub release
-        if: steps.tag_check.outputs.exists == 'false'
+      - name: Create or update GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: v${{ steps.version.outputs.version }}
+          tag_name: v${{ needs.prepare.outputs.version }}
+          name: v${{ needs.prepare.outputs.version }}
           draft: false
           prerelease: false
           files: |
-            target/release/dayz-loot-editor-rust
+            ${{ matrix.artifact }}
