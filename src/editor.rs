@@ -4,7 +4,7 @@ use std::{
     io,
     path::PathBuf,
 };
-
+use std::iter::Map;
 use tui::{
     layout::{Constraint, Direction, Layout},
     style::{Modifier, Style},
@@ -60,6 +60,55 @@ pub struct Editor {
     status: String,
 }
 
+impl FieldKey {
+    pub fn get_field_name(&self) -> &str {
+        match self {
+            FieldKey::Element { name, .. } => name.as_str(),
+            FieldKey::Attribute { attr, .. } => attr.as_str(),
+        }
+    }
+
+    pub fn get_help_text(&self) -> String{
+        match self {
+            FieldKey::Element { name, .. } => {
+                match name.as_str() {
+                    "nominal" => "The nominal (wanted) amount in the server. Same as max is max is not used.".to_string(),
+                    "lifetime" => "The amount of time it takes for the item to despawn when the item is on the ground.\nDoes not come into effect if the item is ruined".to_string(),
+                    "restock" => "How long after one of the same item (despawns or is picked up by the player) is a new one spawned.".to_string(),
+                    "min" => "Minimum quantity of items to spawn this applies to the entire map.".to_string(),
+                    "quantmin" => "Minimum quantity of the item to spawn in a stack. Eg. Ammunition stack quantity.".to_string(),
+                    "quantmax" => "Maximum quantity of the item to spawn in a stack. Eg. Ammunition stack quantity.".to_string(),
+                    "cost" => "Loot spawning prioritizer - no one really knows what this does exactly. :D".to_string(),
+                    "category" | "usage" | "tag" => "The location class of where this item can spawn.".to_string(),
+                    "flags" => "".to_string(),
+                    _ => "Unknown field - open a github issue with the field name.".to_string()
+                }
+            }
+            FieldKey::Attribute { attr, .. } => {
+                match attr.as_str() {
+                    "count_in_cargo" => "Boolean flag. Sets the total amount that can spawn (map wide) in cargo (tents, boxes, vehicles).\nIf flag is set to 1, item won't spawn if there are already a nominal number of items for this flag.".to_string(),
+                    "count_in_hoarder" => "Boolean flag. Sets the total amount that can spawn (map wide) in Zombies.\nIf flag is set to 1, item won't spawn if there are already a nominal number of items for this flag.".to_string(),
+                    "count_in_map" => "Boolean flag. Sets the total amount that can spawn on the map.\nIf flag is set to 1, item won't spawn if there are already a nominal number of items for this flag.".to_string(),
+                    "count_in_player" => "Boolean flag. Sets the total amount that can spawn (map wide) on players.\nIf flag is set to 1, item won't spawn if there are already a nominal number of items for this flag.".to_string(),
+                    "crafted" => "Boolean flag. Sets the total amount based on crafted count (map wide)\nIf flag is set to 1, item won't spawn if there are already a nominal number of items for this flag.".to_string(),
+                    "deloot" => "Boolean flag. Sets the total amount (map wide) from dynamic events. E.g Helicopter crashes etc.\nIf flag is set to 1, item won't spawn if there are already a nominal number of items for this flag.".to_string(),
+                    "name" => "The location class of where this item can spawn.".to_string(),
+                    _ => {
+                        format!("Unknown attribute - open a github issue. {}", attr)
+                    },
+                }
+            }
+        }
+    }
+
+    pub fn get_element_name(&self) -> &str {
+        match self {
+            FieldKey::Element { name, .. } => name.as_str(),
+            FieldKey::Attribute { element, .. } => element.as_str(),
+        }
+    }
+}
+
 impl Editor {
     pub fn new() -> Self {
         Self {
@@ -83,7 +132,7 @@ impl Editor {
         self.types = types;
         self.selected_type = 0;
         self.selected_field = 0;
-        self.focus = EditorFocus::FieldList;
+        self.focus = EditorFocus::TypeList;
         self.editing_target = None;
         self.input_buffer.clear();
         self.status = String::from("Loaded file");
@@ -165,7 +214,11 @@ impl Editor {
 
         let body = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(35), Constraint::Percentage(65)].as_ref())
+            .constraints([
+                Constraint::Percentage(35),
+                Constraint::Percentage(45),
+                Constraint::Percentage(20)
+            ].as_ref())
             .split(chunks[1]);
 
         let type_items: Vec<ListItem> = self
@@ -203,9 +256,16 @@ impl Editor {
             ));
         f.render_stateful_widget(field_list, body[1], &mut field_state);
 
+        let selected_field_string = self.current_field().unwrap().key.get_help_text().to_string();
+        let tips_widget = Paragraph::new(selected_field_string)
+            .block(Block::default().title("Tips").borders(Borders::ALL))
+            .wrap(Wrap { trim: true });
+
+        f.render_widget(tips_widget, body[2]);
+
         let footer_text = if self.focus == EditorFocus::Editing {
-            format!("Help: ? | Quit: q | Status: editing ({})", self.input_buffer)
-        } else {
+            format!("Help: ? | Quit: q | Stat//us: editing ({})", self.input_buffer)
+        } else {//
             format!("Help: ? | Quit: q | Status: {}", self.status)
         };
         let footer = Paragraph::new(footer_text)
