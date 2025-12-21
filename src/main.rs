@@ -17,6 +17,7 @@ mod action;
 mod window_state;
 mod utils;
 mod remote;
+mod menu;
 
 use crate::file_picker::FilePicker;
 use crate::editor::Editor;
