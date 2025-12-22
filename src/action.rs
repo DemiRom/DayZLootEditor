@@ -18,5 +18,8 @@ pub enum Action {
     PgDown,
     PgUp,
     Tab,
+    ToggleSelect,
+    Undo,
+    Redo,
     None
 }

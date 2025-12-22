@@ -127,7 +127,10 @@ fn map_key_to_action(key: KeyEvent, text_editing: bool, prompt_mode: bool) -> Ac
     }
 
     match key.code {
+        KeyCode::Char(' ') => Action::ToggleSelect,
         KeyCode::Char('q') => Action::Quit,
+        KeyCode::Char('u') => Action::Undo,
+        KeyCode::Char('U') => Action::Redo,
         KeyCode::Up | KeyCode::Char('k') => Action::Up,
         KeyCode::Down | KeyCode::Char('j') => Action::Down,
         KeyCode::Enter => Action::Activate,

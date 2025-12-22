@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fs,
     io,
     path::PathBuf,
@@ -20,7 +20,7 @@ use crate::{
     utils,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum FieldKey {
     Element { name: String, index: usize },
     Attribute { element: String, index: usize, attr: String },
@@ -38,6 +38,16 @@ struct TypeEntry {
     fields: Vec<Field>,
 }
 
+#[derive(Clone, Debug)]
+struct EditorSnapshot {
+    types: Vec<TypeEntry>,
+    selected_type: usize,
+    selected_field: usize,
+    multi_select: bool,
+    selected_types: BTreeSet<usize>,
+    focus: EditorFocus,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EditorFocus {
     TypeList,
@@ -52,14 +62,31 @@ enum EditTarget {
     FieldValue,
 }
 
+#[derive(Clone, Debug)]
+enum PendingAddKind {
+    Field,
+    Attribute { element: String, index: usize },
+}
+
+#[derive(Clone, Debug)]
+struct PendingAdd {
+    kind: PendingAddKind,
+    name: Option<String>,
+}
+
 pub struct Editor {
     path: Option<PathBuf>,
     source: FileSource,
     types: Vec<TypeEntry>,
     selected_type: usize,
     selected_field: usize,
+    multi_select: bool,
+    selected_types: BTreeSet<usize>,
+    undo_stack: Vec<EditorSnapshot>,
+    redo_stack: Vec<EditorSnapshot>,
     focus: EditorFocus,
     editing_target: Option<EditTarget>,
+    pending_add: Option<PendingAdd>,
     input_buffer: String,
     status: String,
 }
@@ -121,8 +148,13 @@ impl Editor {
             types: Vec::new(),
             selected_type: 0,
             selected_field: 0,
+            multi_select: false,
+            selected_types: BTreeSet::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             focus: EditorFocus::TypeList,
             editing_target: None,
+            pending_add: None,
             input_buffer: String::new(),
             status: String::from("Load a file to begin"),
         }
@@ -144,8 +176,13 @@ impl Editor {
         self.types = types;
         self.selected_type = 0;
         self.selected_field = 0;
+        self.multi_select = false;
+        self.selected_types.clear();
+        self.undo_stack.clear();
+        self.redo_stack.clear();
         self.focus = EditorFocus::TypeList;
         self.editing_target = None;
+        self.pending_add = None;
         self.input_buffer.clear();
         self.status = String::from("Loaded file");
         Ok(())
@@ -189,15 +226,35 @@ impl Editor {
                 Action::PgUp => self.move_selection(-10),
                 Action::PgDown => self.move_selection(10),
                 Action::Activate => {
-                    self.begin_editing();
+                    if self.multi_select {
+                        self.status = String::from("Multi-select: editing disabled");
+                    } else {
+                        self.begin_editing();
+                    }
                 }
                 Action::Add => self.add(),
                 Action::AddAttribute => self.add_attribute(),
-                Action::Copy => self.copy(),
-                Action::Delete => self.delete(),
+                Action::Copy => {
+                    if self.multi_select {
+                        self.status = String::from("Multi-select: editing disabled");
+                    } else {
+                        self.copy();
+                    }
+                }
+                Action::Delete => {
+                    if self.multi_select {
+                        self.delete_multi();
+                    } else {
+                        self.delete();
+                    }
+                }
+                Action::Undo => self.undo(),
+                Action::Redo => self.redo(),
                 Action::Save => {
                     self.save()?;
                 }
+                Action::ToggleSelect => self.toggle_type_selection(),
+                Action::Cancel => self.clear_multi_select(),
                 _ => {}
             },
         }
@@ -245,7 +302,16 @@ impl Editor {
         let type_items: Vec<ListItem> = self
             .types
             .iter()
-            .map(|t| ListItem::new(t.name.clone()))
+            .enumerate()
+            .map(|(idx, t)| {
+                let label = if self.multi_select {
+                    let marker = if self.selected_types.contains(&idx) { "[x]" } else { "[ ]" };
+                    format!("{} {}", marker, t.name)
+                } else {
+                    t.name.clone()
+                };
+                ListItem::new(label)
+            })
             .collect();
         let mut type_state = ListState::default();
         if !self.types.is_empty() {
@@ -286,8 +352,13 @@ impl Editor {
 
         let footer_text = if self.focus == EditorFocus::Editing {
             format!("Help: ? | Quit: q | Status: editing ({})", self.input_buffer)
-        } else {//
-            format!("Help: ? | Quit: q | Status: {}", self.status)
+        } else {
+            let status = if self.multi_select {
+                format!("{} | Multi-select: {}", self.status, self.selected_types.len())
+            } else {
+                self.status.clone()
+            };
+            format!("Help: ? | Quit: q | Status: {}", status)
         };
         let footer = Paragraph::new(footer_text)
             .block(Block::default().title("Status").borders(Borders::ALL))
@@ -296,6 +367,15 @@ impl Editor {
 
         if show_help {
             render_help_overlay(f);
+        }
+
+        if self.focus == EditorFocus::Editing {
+            render_input_overlay(
+                f,
+                self.editing_target,
+                self.pending_add.as_ref(),
+                &self.input_buffer,
+            );
         }
     }
 
@@ -367,22 +447,32 @@ impl Editor {
             None => self.focus,
         };
         self.editing_target = None;
+        self.pending_add = None;
         self.input_buffer.clear();
     }
 
     fn apply_input(&mut self) -> bool {
+        if self.pending_add.is_some() {
+            return self.apply_pending_add();
+        }
         let value = self.input_buffer.clone();
         match self.editing_target {
             Some(EditTarget::TypeName) => {
-                if let Some(ty) = self.types.get_mut(self.selected_type) {
-                    ty.name = value;
-                    self.status = String::from("Type renamed");
+                if self.selected_type < self.types.len() {
+                    self.push_undo();
+                    if let Some(ty) = self.types.get_mut(self.selected_type) {
+                        ty.name = value;
+                        self.status = String::from("Type renamed");
+                    }
                 }
                 false
             }
             Some(EditTarget::FieldName) => {
-                if let Some(field) = self.current_field_mut() {
-                    field.key.set_name(value);
+                if self.current_field().is_some() {
+                    self.push_undo();
+                    if let Some(field) = self.current_field_mut() {
+                        field.key.set_name(value);
+                    }
                     if let Some(field) = self.current_field() {
                         self.input_buffer = field.value.clone();
                         self.editing_target = Some(EditTarget::FieldValue);
@@ -394,13 +484,90 @@ impl Editor {
                 false
             }
             Some(EditTarget::FieldValue) => {
-                if let Some(field) = self.current_field_mut() {
-                    field.value = value;
-                    self.status = String::from("Value updated");
+                if self.current_field().is_some() {
+                    self.push_undo();
+                    if let Some(field) = self.current_field_mut() {
+                        field.value = value;
+                        self.status = String::from("Value updated");
+                    }
                 }
                 false
             }
             None => false,
+        }
+    }
+
+    fn apply_pending_add(&mut self) -> bool {
+        let value = self.input_buffer.clone();
+        let Some(pending) = self.pending_add.clone() else {
+            return false;
+        };
+        match self.editing_target {
+            Some(EditTarget::FieldName) => {
+                let label = match pending.kind {
+                    PendingAddKind::Field => "field",
+                    PendingAddKind::Attribute { .. } => "attribute",
+                };
+                self.pending_add = Some(PendingAdd {
+                    kind: pending.kind,
+                    name: Some(value),
+                });
+                self.input_buffer.clear();
+                self.editing_target = Some(EditTarget::FieldValue);
+                self.status = format!("Enter a value for the new {}", label);
+                true
+            }
+            Some(EditTarget::FieldValue) => {
+                let name = pending.name.unwrap_or_else(|| "new_field".to_string());
+                let indices = self.selected_type_indices();
+                if indices.is_empty() {
+                    self.status = String::from("No types selected");
+                    return false;
+                }
+                let label = match pending.kind {
+                    PendingAddKind::Field => "field",
+                    PendingAddKind::Attribute { .. } => "attribute",
+                };
+                self.push_undo();
+                let mut updated = 0;
+                for idx in indices {
+                    if let Some(ty) = self.types.get_mut(idx) {
+                        let field = match &pending.kind {
+                            PendingAddKind::Field => {
+                                let field_idx = ty
+                                    .fields
+                                    .iter()
+                                    .filter(|f| matches!(&f.key, FieldKey::Element { name: field_name, .. } if field_name == &name))
+                                    .count();
+                                Field {
+                                    key: FieldKey::Element {
+                                        name: name.clone(),
+                                        index: field_idx,
+                                    },
+                                    value: value.clone(),
+                                }
+                            }
+                            PendingAddKind::Attribute { element, index } => Field {
+                                key: FieldKey::Attribute {
+                                    element: element.clone(),
+                                    index: *index,
+                                    attr: name.clone(),
+                                },
+                                value: value.clone(),
+                            },
+                        };
+                        ty.fields.push(field);
+                        if idx == self.selected_type {
+                            self.selected_field = ty.fields.len().saturating_sub(1);
+                        }
+                        updated += 1;
+                    }
+                }
+                self.status = format!("Added {} to {} types", label, updated);
+                self.pending_add = None;
+                false
+            }
+            _ => false,
         }
     }
 
@@ -440,6 +607,11 @@ impl Editor {
     fn add(&mut self) {
         match self.focus {
             EditorFocus::TypeList => {
+                if self.multi_select {
+                    self.status = String::from("Multi-select: add fields from the field list");
+                    return;
+                }
+                self.push_undo();
                 let new_type = TypeEntry {
                     name: String::from("new_type"),
                     fields: default_fields(),
@@ -447,15 +619,20 @@ impl Editor {
                 self.types.push(new_type);
                 self.selected_type = self.types.len().saturating_sub(1);
                 self.selected_field = 0;
-                self.focus = EditorFocus::TypeList;
+                self.focus = EditorFocus::Editing;
                 self.editing_target = Some(EditTarget::TypeName);
                 self.input_buffer = String::from("new_type");
                 self.status = String::from("Enter a name for the new type");
             }
             EditorFocus::FieldList => {
+                if self.multi_select {
+                    self.begin_multi_add_field();
+                    return;
+                }
                 if self.types.is_empty() {
                     return;
                 }
+                self.push_undo();
                 let new_field_name = String::from("new_field");
                 let idx = self
                     .types
@@ -481,12 +658,21 @@ impl Editor {
     }
 
     fn add_attribute(&mut self) {
+        if self.multi_select {
+            if self.focus == EditorFocus::FieldList {
+                self.begin_multi_add_attribute();
+            } else {
+                self.status = String::from("Multi-select: add attributes from the field list");
+            }
+            return;
+        }
         if self.types.is_empty() {
             return;
         }
-        let Some(base_field) = self.current_field() else {
+        let Some(base_field) = self.current_field().cloned() else {
             return;
         };
+        self.push_undo();
         let element = base_field.key.get_element_name().to_string();
         let index = match &base_field.key {
             FieldKey::Element { index, .. } => *index,
@@ -515,6 +701,7 @@ impl Editor {
         match self.focus {
             EditorFocus::TypeList => {
                 if let Some(current) = self.types.get(self.selected_type).cloned() {
+                    self.push_undo();
                     let mut clone = current.clone();
                     clone.name = format!("{}_copy", clone.name);
                     self.types.push(clone);
@@ -524,8 +711,13 @@ impl Editor {
                 }
             }
             EditorFocus::FieldList => {
-                if let Some(ty) = self.types.get_mut(self.selected_type) {
-                    if let Some(field) = ty.fields.get(self.selected_field).cloned() {
+                if let Some(field) = self
+                    .types
+                    .get(self.selected_type)
+                    .and_then(|ty| ty.fields.get(self.selected_field).cloned())
+                {
+                    self.push_undo();
+                    if let Some(ty) = self.types.get_mut(self.selected_type) {
                         ty.fields.push(field);
                         self.selected_field = ty.fields.len().saturating_sub(1);
                         self.status = String::from("Field copied");
@@ -540,6 +732,7 @@ impl Editor {
         match self.focus {
             EditorFocus::TypeList => {
                 if !self.types.is_empty() {
+                    self.push_undo();
                     self.types.remove(self.selected_type);
                     if self.selected_type >= self.types.len() && !self.types.is_empty() {
                         self.selected_type = self.types.len() - 1;
@@ -551,8 +744,14 @@ impl Editor {
                 }
             }
             EditorFocus::FieldList => {
-                if let Some(ty) = self.types.get_mut(self.selected_type) {
-                    if !ty.fields.is_empty() {
+                let has_field = self
+                    .types
+                    .get(self.selected_type)
+                    .map(|ty| !ty.fields.is_empty())
+                    .unwrap_or(false);
+                if has_field {
+                    self.push_undo();
+                    if let Some(ty) = self.types.get_mut(self.selected_type) {
                         ty.fields.remove(self.selected_field);
                         if self.selected_field >= ty.fields.len() && !ty.fields.is_empty() {
                             self.selected_field = ty.fields.len() - 1;
@@ -565,6 +764,207 @@ impl Editor {
             }
             EditorFocus::Editing => {}
         }
+    }
+
+    fn delete_multi(&mut self) {
+        match self.focus {
+            EditorFocus::TypeList => self.delete_selected_types(),
+            EditorFocus::FieldList => self.delete_field_multi(),
+            EditorFocus::Editing => {}
+        }
+    }
+
+    fn snapshot(&self) -> EditorSnapshot {
+        EditorSnapshot {
+            types: self.types.clone(),
+            selected_type: self.selected_type,
+            selected_field: self.selected_field,
+            multi_select: self.multi_select,
+            selected_types: self.selected_types.clone(),
+            focus: match self.focus {
+                EditorFocus::Editing => EditorFocus::FieldList,
+                other => other,
+            },
+        }
+    }
+
+    fn restore_snapshot(&mut self, snapshot: EditorSnapshot) {
+        self.types = snapshot.types;
+        self.selected_type = snapshot.selected_type;
+        self.selected_field = snapshot.selected_field;
+        self.multi_select = snapshot.multi_select;
+        self.selected_types = snapshot.selected_types;
+        self.focus = snapshot.focus;
+        self.editing_target = None;
+        self.pending_add = None;
+        self.input_buffer.clear();
+    }
+
+    fn push_undo(&mut self) {
+        self.undo_stack.push(self.snapshot());
+        self.redo_stack.clear();
+    }
+
+    fn undo(&mut self) {
+        if self.undo_stack.is_empty() {
+            self.status = String::from("Nothing to undo");
+            return;
+        }
+        let current = self.snapshot();
+        if let Some(previous) = self.undo_stack.pop() {
+            self.redo_stack.push(current);
+            self.restore_snapshot(previous);
+            self.status = String::from("Undid change");
+        }
+    }
+
+    fn redo(&mut self) {
+        if self.redo_stack.is_empty() {
+            self.status = String::from("Nothing to redo");
+            return;
+        }
+        let current = self.snapshot();
+        if let Some(next) = self.redo_stack.pop() {
+            self.undo_stack.push(current);
+            self.restore_snapshot(next);
+            self.status = String::from("Redid change");
+        }
+    }
+
+    fn toggle_type_selection(&mut self) {
+        if self.focus != EditorFocus::TypeList || self.types.is_empty() {
+            return;
+        }
+        if !self.multi_select {
+            self.multi_select = true;
+        }
+        if !self.selected_types.insert(self.selected_type) {
+            self.selected_types.remove(&self.selected_type);
+        }
+        if self.selected_types.is_empty() {
+            self.multi_select = false;
+            self.status = String::from("Multi-select cleared");
+        } else {
+            self.status = format!("Selected {} types", self.selected_types.len());
+        }
+    }
+
+    fn clear_multi_select(&mut self) {
+        if self.multi_select {
+            self.multi_select = false;
+            self.selected_types.clear();
+            self.status = String::from("Multi-select cleared");
+        }
+    }
+
+    fn selected_type_indices(&self) -> Vec<usize> {
+        if self.multi_select {
+            self.selected_types.iter().copied().collect()
+        } else if self.types.is_empty() {
+            Vec::new()
+        } else {
+            vec![self.selected_type]
+        }
+    }
+
+    fn begin_multi_add_field(&mut self) {
+        if self.types.is_empty() {
+            return;
+        }
+        if self.selected_type_indices().is_empty() {
+            self.status = String::from("No types selected");
+            return;
+        }
+        self.pending_add = Some(PendingAdd {
+            kind: PendingAddKind::Field,
+            name: None,
+        });
+        self.focus = EditorFocus::Editing;
+        self.editing_target = Some(EditTarget::FieldName);
+        self.input_buffer = String::from("new_field");
+        self.status = String::from("Enter a name for the new field");
+    }
+
+    fn begin_multi_add_attribute(&mut self) {
+        if self.types.is_empty() {
+            return;
+        }
+        if self.selected_type_indices().is_empty() {
+            self.status = String::from("No types selected");
+            return;
+        }
+        let Some(base_field) = self.current_field().cloned() else {
+            return;
+        };
+        let element = base_field.key.get_element_name().to_string();
+        let index = match &base_field.key {
+            FieldKey::Element { index, .. } => *index,
+            FieldKey::Attribute { index, .. } => *index,
+        };
+        self.pending_add = Some(PendingAdd {
+            kind: PendingAddKind::Attribute { element, index },
+            name: None,
+        });
+        self.focus = EditorFocus::Editing;
+        self.editing_target = Some(EditTarget::FieldName);
+        self.input_buffer = String::from("new_attr");
+        self.status = String::from("Enter a name for the new attribute");
+    }
+
+    fn delete_selected_types(&mut self) {
+        if self.types.is_empty() {
+            return;
+        }
+        let mut indices = self.selected_type_indices();
+        if indices.is_empty() {
+            return;
+        }
+        self.push_undo();
+        indices.sort_unstable_by(|a, b| b.cmp(a));
+        let total = indices.len();
+        for idx in indices {
+            if idx < self.types.len() {
+                self.types.remove(idx);
+            }
+        }
+        if self.types.is_empty() {
+            self.selected_type = 0;
+        } else if self.selected_type >= self.types.len() {
+            self.selected_type = self.types.len() - 1;
+        }
+        self.selected_field = 0;
+        self.multi_select = false;
+        self.selected_types.clear();
+        self.status = format!("Deleted {} types", total);
+    }
+
+    fn delete_field_multi(&mut self) {
+        let Some(current) = self.current_field() else {
+            return;
+        };
+        let key = current.key.clone();
+        let indices = self.selected_type_indices();
+        if indices.is_empty() {
+            return;
+        }
+        self.push_undo();
+        let mut updated = 0;
+        for idx in indices {
+            if let Some(ty) = self.types.get_mut(idx) {
+                if let Some(pos) = ty.fields.iter().position(|field| field.key == key) {
+                    ty.fields.remove(pos);
+                    if idx == self.selected_type {
+                        if self.selected_field >= ty.fields.len() && !ty.fields.is_empty() {
+                            self.selected_field = ty.fields.len() - 1;
+                        } else if ty.fields.is_empty() {
+                            self.selected_field = 0;
+                        }
+                    }
+                    updated += 1;
+                }
+            }
+        }
+        self.status = format!("Deleted field from {} types", updated);
     }
 
     fn current_fields(&self) -> Vec<Field> {
@@ -608,11 +1008,36 @@ fn highlight_for(active: bool) -> Style {
 
 fn render_help_overlay<B: tui::backend::Backend>(f: &mut tui::Frame<B>) {
     let area = utils::centered_rect(70, 70, f.size());
-    let text = "Editor Help\n\nNavigation: Up/Down or j/k or PageUp/PageDown to move, Left/Right to switch pane\nEditing: Enter to edit, Esc to cancel, type to change text, Enter to apply\nActions: a add (type or field), t add field with attribute, c copy, d delete, s save, q quit, ? help";
+    let text = "Editor Help\n\nNavigation: Up/Down or j/k or PageUp/PageDown to move, Left/Right to switch pane\nEditing: Enter to edit, Esc to cancel, type to change text, Enter to apply\nMulti-select: Space to toggle selection in Types, Esc to clear selection\nUndo/Redo: u undo, U redo\nActions: a add (type or field), t add field with attribute, c copy, d delete, s save, q quit, ? help";
     let block = Block::default().title("Help").borders(Borders::ALL);
     let help = Paragraph::new(text).wrap(Wrap { trim: true }).block(block);
     f.render_widget(Clear, area);
     f.render_widget(help, area);
+}
+
+fn render_input_overlay<B: tui::backend::Backend>(
+    f: &mut tui::Frame<B>,
+    editing_target: Option<EditTarget>,
+    pending_add: Option<&PendingAdd>,
+    input: &str,
+) {
+    let area = utils::centered_rect(60, 25, f.size());
+    let title = match (editing_target, pending_add.map(|p| &p.kind)) {
+        (Some(EditTarget::TypeName), _) => "Type Name",
+        (Some(EditTarget::FieldName), Some(PendingAddKind::Attribute { .. })) => "Attribute Name",
+        (Some(EditTarget::FieldValue), Some(PendingAddKind::Attribute { .. })) => "Attribute Value",
+        (Some(EditTarget::FieldName), _) => "Field Name",
+        (Some(EditTarget::FieldValue), _) => "Field Value",
+        _ => "Input",
+    };
+    let text = format!(
+        "{}\n\n{}\n\nEnter to accept, Esc to cancel",
+        title, input
+    );
+    let block = Block::default().title("Edit").borders(Borders::ALL);
+    let prompt = Paragraph::new(text).wrap(Wrap { trim: true }).block(block);
+    f.render_widget(Clear, area);
+    f.render_widget(prompt, area);
 }
 
 
